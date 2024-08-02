@@ -21,6 +21,9 @@ if "selected_paper" not in st.session_state:
 if "search_results" not in st.session_state:
     st.session_state.search_results = []
 
+# if "search_results_df" not in st.session_state:
+#     st.session_state.search_results_df = None
+
 
 # Functions
 #
@@ -44,11 +47,11 @@ def create_search_results_df(search_results) -> pd.DataFrame:
         data.append({
             'title': r.title,
             'authors': ', '.join([author.name for author in r.authors]),
-            'published': r.published,
+            'published': r.published.date(),
             'summary': r.summary,
             'primary_category': r.primary_category,
             'categories': ', '.join(r.categories),
-            "links": r.links
+            "links": [link.href for link in r.links]
         })
     return pd.DataFrame(data)
 
@@ -104,7 +107,7 @@ results_tab, vec_space_tab = st.tabs(["Search results", "Vector space model"])
 with results_tab:
     col_title, col_info = st.columns(2)
 
-    if 'search_results_df' in st.session_state and not st.session_state.search_results_df.empty:
+    if "search_results_df" in st.session_state and not st.session_state.search_results_df.empty:
         max_title_length = max(st.session_state.search_results_df['title'].apply(len))
         max_button_label = 106
 
@@ -115,7 +118,6 @@ with results_tab:
                     display_title = (f"{idx+1}." + row['title'][:max_button_label] + "...") if len(row['title']) > max_button_label else f"{idx+1}." + row["title"]
                     st.button(label= display_title, key= display_title, on_click= select_paper, args= (row["title"], row["authors"], row["summary"], str(row["published"]), row["links"]), use_container_width= False, help= "Click to see description.")
 
-
     with col_info:
         con_info = st.container(border= False)
         with con_info:
@@ -123,10 +125,18 @@ with results_tab:
                 st.write(f"{st.session_state.selected_paper["title"]}, {st.session_state.selected_paper["published"][:10]}")
                 st.write(f"Authors: {st.session_state.selected_paper["authors"]}")
                 st.write(st.session_state.selected_paper["summary"])
-                st.write(f"Link to abs: {st.session_state.selected_paper["links"][0]}")
-                st.write(f"Link to pdf: {st.session_state.selected_paper["links"][1]}")
 
-
+                if len(st.session_state.selected_paper["links"]) == 3:
+                    st.write(f"Link to doi: {st.session_state.selected_paper["links"][0]}")
+                    st.write(f"Link to abs: {st.session_state.selected_paper["links"][1]}")
+                    st.write(f"Link to pdf: {st.session_state.selected_paper["links"][2]}")
+                else:
+                    st.write(f"Link to abs: {st.session_state.selected_paper["links"][0]}")
+                    st.write(f"Link to pdf: {st.session_state.selected_paper["links"][1]}")
+            
 with vec_space_tab:
 
     st.write("Placeholder for vec space graphic for the embedded feat")
+    if "search_results_df" in st.session_state and not st.session_state.search_results_df.empty:
+        st.write(st.session_state.search_results_df)
+        
