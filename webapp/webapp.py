@@ -2,8 +2,17 @@ import streamlit as st
 import arxiv
 import datetime as dt
 import pandas as pd 
+import plotly.express as px
+
+from transformers import BertTokenizer, BertModel
+import torch
+from sklearn.decomposition import PCA
 
 
+import warnings
+warnings.filterwarnings("ignore")
+
+# Page config
 st.set_page_config(
     page_title= "Arvix Paper Search",
     page_icon="🔍",
@@ -20,9 +29,6 @@ if "selected_paper" not in st.session_state:
 
 if "search_results" not in st.session_state:
     st.session_state.search_results = []
-
-# if "search_results_df" not in st.session_state:
-#     st.session_state.search_results_df = None
 
 
 # Functions
@@ -69,8 +75,10 @@ def select_paper(title: str, auth: str, sum: str, pub: dt.date, links: list):
     """
     st.session_state.selected_paper = {"title": title, "authors": auth, "summary": sum, "published": pub, "links": links}
 
+def select_row():
+    pass
+    
 
-# Page content
 
 # Page title
 st.title("Arxiv Paper Search Engine")
@@ -136,7 +144,49 @@ with results_tab:
             
 with vec_space_tab:
 
-    st.write("Placeholder for vec space graphic for the embedded feat")
     if "search_results_df" in st.session_state and not st.session_state.search_results_df.empty:
-        st.write(st.session_state.search_results_df)
         
+        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        model = BertModel.from_pretrained("bert-base-uncased")
+        st.session_state.search_results_df["emb_ti_auth_sum"] = None
+
+        for idx, row in st.session_state.search_results_df.iterrows():
+            paper_info = row["authors"] + ", " + row["title"] + ", " + row["summary"]
+            inputs = tokenizer(paper_info, return_tensors= "pt", max_length= 512, truncation= True, padding= True)
+
+            with torch.no_grad():
+                outputs = model(**inputs)
+
+            output_cls_token_emb = outputs.last_hidden_state[:, 0, :].squeeze().numpy()
+            st.session_state.search_results_df.at[idx, "emb_ti_auth_sum"] = output_cls_token_emb
+
+        pca = PCA(n_components= 3)
+        embeddings_reduced = pca.fit_transform(st.session_state.search_results_df["emb_ti_auth_sum"].tolist())
+
+        fig = px.scatter_3d(
+                data_frame= st.session_state.search_results_df,
+                x= embeddings_reduced[:, 0], 
+                y= embeddings_reduced[:, 1], 
+                z= embeddings_reduced[:, 2],
+                title= "Search results in 3D",
+                color= st.session_state.search_results_df["primary_category"],
+                hover_data= ["title", "authors", "published"],
+                custom_data= ["title", "authors", "published"]
+        ).update_layout(
+            width= 2000,
+            height= 800,
+            scene= dict(camera= dict(eye= dict(x= 1.2, y= 1.2, z= 1.2)))
+        )
+
+
+        st.plotly_chart(fig, selection_mode= "points")
+
+        st.write(st.session_state.search_results_df)
+
+# To do's:
+#
+# 1. Implement feat to limit num of res and sort by
+# 2. Implement feat for cos sim between selected data points in vec space tab
+# 3. Implement tab for user to compare generated abs with original abs 
+# 4. Fix warning occuring when embedding paper info with bert
+
