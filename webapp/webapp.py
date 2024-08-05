@@ -10,6 +10,7 @@ import colorsys
 from transformers import BertTokenizer, BertModel
 import torch
 from sklearn.decomposition import PCA
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 import warnings
@@ -50,7 +51,6 @@ def create_search_results_df(search_results) -> pd.DataFrame:
         >>> df = create_search_results_df(search_results)
         >>> print(df.head())
     """
-
     data = []
     for r in search_results:
         data.append({
@@ -64,7 +64,7 @@ def create_search_results_df(search_results) -> pd.DataFrame:
         })
     return pd.DataFrame(data)
 
-def select_paper(title: str, auth: str, sum: str, pub: dt.date, links: list):
+def select_paper(index: int, title: str, auth: str, sum: str, pub: dt.date, links: list):
     """
     On click of a paper button, the session state "selected paper" gets updated with the val of the selected paper
 
@@ -76,7 +76,34 @@ def select_paper(title: str, auth: str, sum: str, pub: dt.date, links: list):
 
     :returns:   - dict: update the attributes of the dict in st.session_state with those of the selected paper
     """
-    st.session_state.selected_paper = {"title": title, "authors": auth, "summary": sum, "published": pub, "links": links}
+    st.session_state.selected_paper = {"idx": index, "title": title, "authors": auth, "summary": sum, "published": pub, "links": links}
+
+def generate_bert_embeddings(df: pd.DataFrame, paper_info_col: list= ["authors", "title", "summary"]) -> pd.Series:
+    """
+    Generates BERT embeddings for paper info (authors, title, summary) and adds them to the df.
+
+    :params:    - df (pd.DataFrame): df with paper info
+                - paper_info_col (list): list of columns with paper info
+    :returns:   - pd.Series: series with BERT embeddings for each paper
+    :example:   
+        >>> df["emb_ti_auth_sum"] = generate_bert_embeddings(df)
+        >>> print(df["emb_ti_auth_sum"])
+    """
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    model = BertModel.from_pretrained("bert-base-uncased")
+    df["emb_ti_auth_sum"] = None
+
+    for idx, row in df.iterrows():
+        paper_info = row[paper_info_col[0]] + ", " + row[paper_info_col[1]] + ", " + row[paper_info_col[2]]
+        inputs = tokenizer(paper_info, return_tensors= "pt", max_length= 512, truncation= True, padding= True)
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+
+        output_cls_token_emb = outputs.last_hidden_state[:, 0, :].squeeze().numpy()
+        df.at[idx, "emb_ti_auth_sum"] = output_cls_token_emb
+
+    return df["emb_ti_auth_sum"]
 
 def generate_unique_colors(num_colors: int) -> list:
     """
@@ -98,9 +125,112 @@ def generate_unique_colors(num_colors: int) -> list:
         colors.append(hex_color)
     return colors
 
-def select_row():
-    pass
+def plot_embeddings(df: pd.DataFrame, embeddings: list, groupby_category: bool= False, color_by_cossim: bool= False, cossim_idx: int= 0) -> go.Figure:
+    """
+    Plots 3D PCA of paper embeddings.
     
+    :params:    - df (pd.DataFrame): df with paper info
+                - embeddings (list): list of embeddings
+                - groupby_category (bool): group papers by their primary category
+                - color_by_cossim (bool): color papers by their cosine similarity to the selected paper
+                - cossim_idx (int): index of the selected paper
+    :returns:   - go.Figure: plotly figure
+    :example:   
+        >>> fig = plot_embeddings(df, embeddings)
+        >>> st.plot
+    """
+    if groupby_category:
+        unique_categories = df["primary_category"].unique()
+        colors = generate_unique_colors(len(unique_categories))
+        color_mapping = {category: color for category, color in zip(unique_categories, colors)}
+        traces = []
+        for category in unique_categories:
+            category_mask = df["primary_category"] == category
+            trace = go.Scatter3d(
+                x= embeddings[category_mask, 0],
+                y= embeddings[category_mask, 1],
+                z= embeddings[category_mask, 2],
+                mode="markers+text",
+                marker=dict(
+                    size= 5,
+                    color= color_mapping.get(category, "black"),
+                ),
+                text= df[category_mask].index.values,
+                name= category
+            )
+            traces.append(trace)
+
+    else:
+        if color_by_cossim:
+            min_cossim = -1
+            max_cossim = 1
+            norm = lambda x: (x - min_cossim) / (max_cossim - min_cossim)
+            colorscale = px.colors.sequential.Viridis
+
+            traces = []
+            for idx, row in df.iterrows():
+                normalized_value = norm(row[f"cossim{cossim_idx}"])
+                if idx == cossim_idx:
+                    color = "red"
+                else: 
+                    color = colorscale[int(normalized_value * (len(colorscale) - 1))]
+                
+                # color = "red" if idx == cossim_idx else colorscale[int(norm(row[f"cossim{cossim_idx}"])) * (len(colorscale) - 1)]
+                trace = go.Scatter3d(
+                    x= [row["emb_ti_auth_sum_reduced"][0]],
+                    y= [row["emb_ti_auth_sum_reduced"][1]],
+                    z= [row["emb_ti_auth_sum_reduced"][2]],
+                    mode="markers+text",
+                    marker=dict(
+                        size= 5,
+                        color= color
+                    ),
+                    text= idx,
+                    name= f"{idx}. {row["title"][:25]}..."
+                )
+                traces.append(trace)
+        else:
+            colors_paperwise = generate_unique_colors(len(df))
+            color_mapping_paperwise = {idx+1: color for idx, color in zip(df.index, colors_paperwise)}
+            traces = []
+            for idx, row in df.iterrows():
+                trace = go.Scatter3d(
+                    x= [row["emb_ti_auth_sum_reduced"][0]],
+                    y= [row["emb_ti_auth_sum_reduced"][1]],
+                    z= [row["emb_ti_auth_sum_reduced"][2]],
+                    mode="markers+text",
+                    marker=dict(
+                        size= 5,
+                        color= color_mapping_paperwise.get(idx+1, "black")
+                    ),
+                    text= idx+1,
+                    name= f"{idx+1}. {row["title"][:25]}..."
+                )
+                traces.append(trace)
+
+    fig =  go.Figure(data= traces, layout= dict(width= 2000, height= 600, title= "3D PCA of paper embeddings", legend_title= dict(text= "Categories"), scene= dict(camera= dict(eye= dict(x= .7, y= .7, z= .7)))))
+    
+    return fig
+
+def calculate_cosine_similarities(df: pd.DataFrame, index: int) -> pd.DataFrame:
+    """
+    Calculates cosine similarities between the selected paper and all other papers in the df.
+
+    :params:    - df (pd.DataFrame): df with paper info
+                - index (int): index of the selected paper 
+    :returns:   - pd.DataFrame: df with cosine similarities
+    :example:   
+        >>> df = calculate_cosine_similarities(df, 0)
+        >>> print(df.head())
+    """
+    if f"cossim{index}" in df.columns:
+        return df
+    
+    else:
+        target_embedding = df.loc[index, "emb_ti_auth_sum_reduced"]
+        df["cossim" + f"{index}"] = cosine_similarity([target_embedding], df["emb_ti_auth_sum_reduced"].tolist())[0]
+
+    return df
 
 # Page title
 st.title("Arxiv Paper Search Engine")
@@ -159,13 +289,13 @@ with results_tab:
             with con_title:
                 for idx, row in st.session_state.search_results_df.iterrows():
                     display_title = (f"{idx+1}." + row['title'][:max_button_label] + "...") if len(row['title']) > max_button_label else f"{idx+1}." + row["title"]
-                    st.button(label= display_title, key= display_title, on_click= select_paper, args= (row["title"], row["authors"], row["summary"], str(row["published"]), row["links"]), use_container_width= False, help= "Click to see description.")
+                    st.button(label= display_title, key= display_title, on_click= select_paper, args= (idx+1, row["title"], row["authors"], row["summary"], str(row["published"]), row["links"]), use_container_width= False, help= "Click to see description.")
 
     with col_info:
         con_info = st.container(border= False)
         with con_info:
             if st.session_state.selected_paper:
-                st.write(f"{st.session_state.selected_paper["title"]}, {st.session_state.selected_paper["published"][:10]}")
+                st.write(f"{st.session_state.selected_paper["idx"]}.{st.session_state.selected_paper["title"]}, {st.session_state.selected_paper["published"][:10]}")
                 st.write(f"Authors: {st.session_state.selected_paper["authors"]}")
                 st.write(st.session_state.selected_paper["summary"])
 
@@ -179,57 +309,41 @@ with results_tab:
             
 with vec_space_tab:
 
+
     if "search_results_df" in st.session_state and not st.session_state.search_results_df.empty:
+
+        input_groupby_cat_col, input_cossim_idx_col, input_color_cossim_col = st.columns(3)
+        with input_groupby_cat_col: 
+            input_groupby_cat = st.radio(label= "Group by category", options= ["No", "Yes"], key= "groupby_cat_selectbox", horizontal= True, help= "Group papers by their primary category.")
         
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-        model = BertModel.from_pretrained("bert-base-uncased")
-        st.session_state.search_results_df["emb_ti_auth_sum"] = None
+        if input_groupby_cat == "No":    
+            with input_cossim_idx_col:    
+                input_cossim_idx = st.number_input(label= "Calculate cosine sim for paper", min_value= 0, max_value= len(st.session_state.search_results_df), value= 0, step= 1, key= "cossim_input", help= "Calculate cosine similarity for selected paper with all other papers in the df.")
+            with input_color_cossim_col:
+                input_color_cossim = st.toggle(label= "Color by cosine sim", value= False, key= "groupby_cossim_toggle", help= "Group papers by their cosine similarity to the selected paper.")
 
-        for idx, row in st.session_state.search_results_df.iterrows():
-            paper_info = row["authors"] + ", " + row["title"] + ", " + row["summary"]
-            inputs = tokenizer(paper_info, return_tensors= "pt", max_length= 512, truncation= True, padding= True)
 
-            with torch.no_grad():
-                outputs = model(**inputs)
-
-            output_cls_token_emb = outputs.last_hidden_state[:, 0, :].squeeze().numpy()
-            st.session_state.search_results_df.at[idx, "emb_ti_auth_sum"] = output_cls_token_emb
-
+        st.session_state.search_results_df["emb_ti_auth_sum"] = generate_bert_embeddings(st.session_state.search_results_df)
+        
+        # own function
         pca = PCA(n_components= 3)
         embeddings_reduced = pca.fit_transform(st.session_state.search_results_df["emb_ti_auth_sum"].tolist())
         st.session_state.search_results_df["emb_ti_auth_sum_reduced"] = embeddings_reduced.tolist()
-
-        unique_categories = st.session_state.search_results_df["primary_category"].unique()
-        colors = generate_unique_colors(len(unique_categories))
-        color_mapping = {category: color for category, color in zip(unique_categories, colors)}
-
-        traces = []
-        for category in unique_categories:
-            category_mask = st.session_state.search_results_df["primary_category"] == category
-            trace = go.Scatter3d(
-                x=embeddings_reduced[category_mask, 0],
-                y=embeddings_reduced[category_mask, 1],
-                z=embeddings_reduced[category_mask, 2],
-                mode="markers+text",
-                marker=dict(
-                    size=5,
-                    color= color_mapping.get(category, "black"),
-                ),
-                text= st.session_state.search_results_df[category_mask].index.values,
-                name= category
-            )
-            traces.append(trace)
-
-        fig = go.Figure(data= traces, layout= dict(width= 2000, height= 600, title= "3D PCA of paper embeddings", legend_title= dict(text= "Categories"), scene= dict(camera= dict(eye= dict(x= .7, y= .7, z= .7)))))
-
+        # ------------
+        
+        st.session_state.search_results_df = calculate_cosine_similarities(st.session_state.search_results_df, input_cossim_idx)
+        fig = plot_embeddings(st.session_state.search_results_df, embeddings_reduced, groupby_category= input_groupby_cat == "Yes", color_by_cossim= input_color_cossim, cossim_idx= input_cossim_idx)
         st.plotly_chart(fig, selection_mode= "points")
+
+        
+
         st.write(st.session_state.search_results_df)
 
 # To do's:
-#
-# - Implement feat to show embeddings by category (now) or by none (all in one color an click on point to highlight paper in df) 
+# - Add welcome message to sidebar and create pca function
+# - Make page faster by chaching embeddings generation
 # - Implement feat to cluster paper in emebdding space (on-off-switch to activate color by cluster)
-# - Implement feat for cos sim between selected data points in vec space tab (only available if 2 points are selected -> all in one color mode -> calc for every point in df an give option to sort -> see two papers that are most sim)
+#
 
 # - Fix warning occuring when embedding paper info with bert
 
